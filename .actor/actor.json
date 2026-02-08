@@ -1,0 +1,10 @@
+{
+    "actorSpecification": 1,
+    "name": "youtube-scraper",
+    "title": "YouTube Video Scraper",
+    "description": "Scrapes YouTube videos: extracts transcripts, metadata, chapters, links, and still frames. Perfect for turning video tutorials into structured, searchable content. Designed for n8n integration.",
+    "version": "1.0.0",
+    "buildTag": "latest",
+    "input": "./input_schema.json",
+    "dockerfile": "../Dockerfile"
+}

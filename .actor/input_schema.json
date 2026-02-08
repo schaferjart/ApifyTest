@@ -1,0 +1,45 @@
+{
+    "title": "YouTube Scraper Input",
+    "description": "Provide a YouTube video URL to scrape its transcript, metadata, links, and capture still frames.",
+    "type": "object",
+    "schemaVersion": 1,
+    "required": ["videoUrl"],
+    "properties": {
+        "videoUrl": {
+            "title": "YouTube Video URL",
+            "type": "string",
+            "description": "Full YouTube URL (e.g. https://www.youtube.com/watch?v=dQw4w9WgXcQ) or just the video ID.",
+            "editor": "textfield",
+            "prefill": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        },
+        "language": {
+            "title": "Transcript Language",
+            "type": "string",
+            "description": "ISO language code for the transcript (e.g. 'en', 'de', 'es'). Falls back to auto-generated captions.",
+            "editor": "textfield",
+            "default": "en"
+        },
+        "captureFrames": {
+            "title": "Capture Still Frames",
+            "type": "boolean",
+            "description": "Whether to capture still images from the video at key timestamps.",
+            "default": true
+        },
+        "maxFrames": {
+            "title": "Maximum Frames",
+            "type": "integer",
+            "description": "Maximum number of still frames to capture.",
+            "default": 10,
+            "minimum": 1,
+            "maximum": 50
+        },
+        "frameIntervalSeconds": {
+            "title": "Frame Interval (seconds)",
+            "type": "integer",
+            "description": "Interval between frame captures when the video has no chapters. Ignored if the video has chapters.",
+            "default": 60,
+            "minimum": 10,
+            "maximum": 600
+        }
+    }
+}
