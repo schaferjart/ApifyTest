@@ -1,0 +1,182 @@
+{
+  "name": "YouTube Video to Static Page",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "youtube-to-page",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "youtube-to-page"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.apify.com/v2/acts/{{ $vars.APIFY_ACTOR_ID }}/runs?token={{ $vars.APIFY_API_TOKEN }}&waitForFinish=300",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ videoUrl: $json.body.url, language: $json.body.language || 'en', captureFrames: $json.body.captureFrames !== false, maxFrames: $json.body.maxFrames || 10, frameIntervalSeconds: $json.body.frameIntervalSeconds || 60 }) }}",
+        "options": {
+          "timeout": 310000
+        }
+      },
+      "id": "run-apify-actor",
+      "name": "Run Apify Actor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.apify.com/v2/datasets/{{ $json.data.defaultDatasetId }}/items?token={{ $vars.APIFY_API_TOKEN }}",
+        "options": {}
+      },
+      "id": "fetch-dataset",
+      "name": "Fetch Dataset Results",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 300]
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4o"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a video content analyst. Given a YouTube video's transcript and chapter list, identify the most valuable and informative sections. Your job is to filter out filler content (generic intros, outros, sponsor segments, \"like and subscribe\" prompts, repetitive statements) and highlight the sections that contain actual substance.\n\nReturn ONLY valid JSON (no markdown fences) in this exact format:\n{\n  \"sections\": [\n    {\n      \"title\": \"Section title (descriptive, not just the chapter name)\",\n      \"startSeconds\": 0,\n      \"endSeconds\": 120,\n      \"summary\": \"2-3 sentence summary of what is covered and why it matters\",\n      \"keyQuote\": \"A particularly insightful or important direct quote from this section\",\n      \"relevanceScore\": 0.95\n    }\n  ],\n  \"videoSummary\": \"2-3 sentence overall summary of the video's value proposition\",\n  \"skipSegments\": [\n    { \"startSeconds\": 0, \"endSeconds\": 15, \"reason\": \"Generic intro\" }\n  ]\n}"
+            },
+            {
+              "role": "user",
+              "content": "=Analyze this video transcript and identify the key sections.\n\nVideo Title: {{ $json[0].title }}\nChannel: {{ $json[0].channelName }}\nDuration: {{ $json[0].duration }}\n\nChapters:\n{{ $json[0].chapters.map(c => c.startFormatted + ' - ' + c.title).join('\\n') || 'No chapters available' }}\n\nFull Transcript:\n{{ $json[0].fullTranscriptText.substring(0, 12000) }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.3,
+          "maxTokens": 2000
+        }
+      },
+      "id": "ai-analysis",
+      "name": "AI Analyze Transcript",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [960, 300],
+      "credentials": {
+        "openAiApi": {
+          "id": "",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Gather inputs\nconst datasetItems = $('Fetch Dataset Results').first().json;\nconst video = Array.isArray(datasetItems) ? datasetItems[0] : datasetItems;\nconst aiRaw = $input.first().json.message?.content || $input.first().json.text || '{}';\n\nlet aiAnalysis;\ntry {\n  // Strip markdown code fences if present\n  const cleaned = aiRaw.replace(/^```json\\s*/i, '').replace(/```\\s*$/i, '').trim();\n  aiAnalysis = JSON.parse(cleaned);\n} catch (e) {\n  aiAnalysis = { sections: [], videoSummary: 'AI analysis could not be parsed.', skipSegments: [] };\n}\n\nconst sections = aiAnalysis.sections || [];\nconst videoSummary = aiAnalysis.videoSummary || '';\n\n// Helper: format seconds to clickable YouTube link\nfunction ytLink(videoId, seconds, label) {\n  const url = `https://www.youtube.com/watch?v=${videoId}&t=${Math.floor(seconds)}`;\n  return `<a href=\"${url}\" target=\"_blank\" rel=\"noopener\">${label}</a>`;\n}\n\nfunction escapeHtml(text) {\n  if (!text) return '';\n  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');\n}\n\nfunction formatNumber(num) {\n  if (!num) return '0';\n  if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';\n  if (num >= 1000) return (num / 1000).toFixed(1) + 'K';\n  return num.toString();\n}\n\n// Build chapters TOC\nlet tocHtml = '';\nif (video.chapters && video.chapters.length > 0) {\n  tocHtml = '<nav class=\"toc\"><h2>Table of Contents</h2><ol>';\n  for (const ch of video.chapters) {\n    tocHtml += `<li>${ytLink(video.videoId, ch.startSeconds, ch.startFormatted)} &mdash; ${escapeHtml(ch.title)}</li>`;\n  }\n  tocHtml += '</ol></nav>';\n}\n\n// Build key sections\nlet sectionsHtml = '';\nif (sections.length > 0) {\n  sectionsHtml = '<section class=\"key-sections\"><h2>Key Sections</h2>';\n  \n  // Find matching frames for each section\n  for (const sec of sections) {\n    // Find a frame near this section's start time\n    let frameHtml = '';\n    if (video.frames && video.frames.length > 0) {\n      const matchingFrame = video.frames.find(f => \n        f.timestampSeconds >= sec.startSeconds && \n        f.timestampSeconds <= (sec.endSeconds || sec.startSeconds + 60)\n      ) || video.frames.reduce((closest, f) => \n        Math.abs(f.timestampSeconds - sec.startSeconds) < Math.abs(closest.timestampSeconds - sec.startSeconds) ? f : closest\n      );\n      if (matchingFrame) {\n        frameHtml = `<div class=\"section-frame\"><img src=\"${escapeHtml(matchingFrame.imageUrl)}\" alt=\"${escapeHtml(matchingFrame.label)}\" loading=\"lazy\"><span class=\"frame-label\">${escapeHtml(matchingFrame.label)} (${matchingFrame.timestampFormatted})</span></div>`;\n      }\n    }\n    \n    // Find transcript segments for this section\n    let transcriptExcerpt = '';\n    if (video.transcript && video.transcript.length > 0) {\n      const relevantSegments = video.transcript.filter(t => \n        t.startSeconds >= sec.startSeconds && \n        t.startSeconds <= (sec.endSeconds || sec.startSeconds + 120)\n      ).slice(0, 8);\n      if (relevantSegments.length > 0) {\n        transcriptExcerpt = '<div class=\"transcript-excerpt\">';\n        for (const seg of relevantSegments) {\n          transcriptExcerpt += `<span class=\"ts-link\">${ytLink(video.videoId, seg.startSeconds, seg.startFormatted)}</span> ${escapeHtml(seg.text)} `;\n        }\n        transcriptExcerpt += '</div>';\n      }\n    }\n    \n    const startFormatted = (() => {\n      const m = Math.floor(sec.startSeconds / 60);\n      const s = Math.floor(sec.startSeconds % 60);\n      return `${m}:${String(s).padStart(2, '0')}`;\n    })();\n    \n    sectionsHtml += `\n      <article class=\"key-section\">\n        <h3>${ytLink(video.videoId, sec.startSeconds, '&#9654; ' + startFormatted)} &mdash; ${escapeHtml(sec.title)}</h3>\n        ${frameHtml}\n        <p class=\"section-summary\">${escapeHtml(sec.summary)}</p>\n        ${sec.keyQuote ? `<blockquote>&ldquo;${escapeHtml(sec.keyQuote)}&rdquo;</blockquote>` : ''}\n        ${transcriptExcerpt}\n      </article>`;\n  }\n  sectionsHtml += '</section>';\n}\n\n// Build links section\nlet linksHtml = '';\nif (video.links && video.links.length > 0) {\n  linksHtml = '<section class=\"links\"><h2>Links &amp; Resources</h2><ul>';\n  for (const link of video.links) {\n    linksHtml += `<li><a href=\"${escapeHtml(link.url)}\" target=\"_blank\" rel=\"noopener\">${escapeHtml(link.url)}</a>`;\n    if (link.context) {\n      linksHtml += `<br><span class=\"link-context\">${escapeHtml(link.context)}</span>`;\n    }\n    linksHtml += '</li>';\n  }\n  linksHtml += '</ul></section>';\n}\n\n// Build full transcript (collapsible)\nlet fullTranscriptHtml = '';\nif (video.transcript && video.transcript.length > 0) {\n  fullTranscriptHtml = '<section class=\"full-transcript\"><details><summary><h2 style=\"display:inline\">Full Transcript</h2></summary><div class=\"transcript-body\">';\n  \n  let currentChapterIdx = 0;\n  for (const seg of video.transcript) {\n    // Insert chapter headers\n    if (video.chapters && video.chapters.length > 0) {\n      while (currentChapterIdx < video.chapters.length && \n             video.chapters[currentChapterIdx].startSeconds <= seg.startSeconds) {\n        if (currentChapterIdx > 0 || video.chapters[currentChapterIdx].startSeconds === 0) {\n          fullTranscriptHtml += `<h4 class=\"chapter-marker\">${escapeHtml(video.chapters[currentChapterIdx].title)}</h4>`;\n        }\n        currentChapterIdx++;\n      }\n    }\n    fullTranscriptHtml += `<p><span class=\"ts-link\">${ytLink(video.videoId, seg.startSeconds, seg.startFormatted)}</span> ${escapeHtml(seg.text)}</p>`;\n  }\n  fullTranscriptHtml += '</div></details></section>';\n}\n\n// Assemble final HTML\nconst html = `<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title>${escapeHtml(video.title)} — Video Notes</title>\n  <style>\n    *, *::before, *::after { box-sizing: border-box; }\n    body {\n      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\n      line-height: 1.6;\n      max-width: 900px;\n      margin: 0 auto;\n      padding: 20px;\n      color: #1a1a1a;\n      background: #fafafa;\n    }\n    a { color: #1a73e8; text-decoration: none; }\n    a:hover { text-decoration: underline; }\n    \n    .video-header {\n      display: flex;\n      gap: 20px;\n      background: #fff;\n      border-radius: 12px;\n      padding: 20px;\n      box-shadow: 0 1px 3px rgba(0,0,0,0.1);\n      margin-bottom: 24px;\n    }\n    .video-header img {\n      width: 320px;\n      height: 180px;\n      object-fit: cover;\n      border-radius: 8px;\n      flex-shrink: 0;\n    }\n    .video-meta h1 {\n      font-size: 1.4em;\n      margin: 0 0 8px 0;\n    }\n    .video-meta .meta-row {\n      color: #555;\n      font-size: 0.9em;\n      margin: 4px 0;\n    }\n    .video-summary {\n      margin-top: 12px;\n      font-style: italic;\n      color: #333;\n    }\n    \n    .toc {\n      background: #fff;\n      border-radius: 12px;\n      padding: 20px;\n      box-shadow: 0 1px 3px rgba(0,0,0,0.1);\n      margin-bottom: 24px;\n    }\n    .toc h2 { margin-top: 0; font-size: 1.2em; }\n    .toc ol { padding-left: 20px; }\n    .toc li { margin: 6px 0; }\n    \n    .key-sections { margin-bottom: 24px; }\n    .key-sections h2 { font-size: 1.2em; }\n    .key-section {\n      background: #fff;\n      border-radius: 12px;\n      padding: 20px;\n      box-shadow: 0 1px 3px rgba(0,0,0,0.1);\n      margin-bottom: 16px;\n    }\n    .key-section h3 {\n      margin-top: 0;\n      font-size: 1.1em;\n      color: #1a73e8;\n    }\n    .section-frame {\n      float: right;\n      margin: 0 0 12px 16px;\n      max-width: 280px;\n    }\n    .section-frame img {\n      width: 100%;\n      border-radius: 8px;\n    }\n    .frame-label {\n      display: block;\n      font-size: 0.8em;\n      color: #777;\n      margin-top: 4px;\n      text-align: center;\n    }\n    .section-summary { color: #333; }\n    blockquote {\n      border-left: 3px solid #1a73e8;\n      margin: 12px 0;\n      padding: 8px 16px;\n      color: #555;\n      font-style: italic;\n      background: #f0f4ff;\n      border-radius: 0 8px 8px 0;\n    }\n    .transcript-excerpt {\n      background: #f5f5f5;\n      border-radius: 8px;\n      padding: 12px;\n      font-size: 0.9em;\n      color: #444;\n      clear: both;\n    }\n    .ts-link a {\n      font-family: 'SF Mono', Monaco, monospace;\n      font-size: 0.85em;\n      background: #e8eef7;\n      padding: 1px 5px;\n      border-radius: 3px;\n      white-space: nowrap;\n    }\n    \n    .links {\n      background: #fff;\n      border-radius: 12px;\n      padding: 20px;\n      box-shadow: 0 1px 3px rgba(0,0,0,0.1);\n      margin-bottom: 24px;\n    }\n    .links h2 { margin-top: 0; font-size: 1.2em; }\n    .links ul { padding-left: 20px; }\n    .links li { margin: 8px 0; }\n    .link-context { font-size: 0.85em; color: #777; }\n    \n    .full-transcript {\n      background: #fff;\n      border-radius: 12px;\n      padding: 20px;\n      box-shadow: 0 1px 3px rgba(0,0,0,0.1);\n      margin-bottom: 24px;\n    }\n    .full-transcript summary { cursor: pointer; }\n    .full-transcript summary h2 { font-size: 1.2em; margin: 0; }\n    .transcript-body { margin-top: 16px; }\n    .transcript-body p { margin: 4px 0; font-size: 0.9em; }\n    .chapter-marker {\n      margin: 20px 0 8px 0;\n      padding: 8px 0;\n      border-bottom: 1px solid #e0e0e0;\n      color: #1a73e8;\n    }\n    \n    footer {\n      text-align: center;\n      padding: 20px;\n      color: #999;\n      font-size: 0.8em;\n    }\n    \n    @media (max-width: 640px) {\n      .video-header { flex-direction: column; }\n      .video-header img { width: 100%; height: auto; }\n      .section-frame { float: none; max-width: 100%; margin: 0 0 12px 0; }\n    }\n  </style>\n</head>\n<body>\n  <header class=\"video-header\">\n    <img src=\"${escapeHtml(video.thumbnailUrl)}\" alt=\"Video thumbnail\">\n    <div class=\"video-meta\">\n      <h1><a href=\"${escapeHtml(video.videoUrl)}\" target=\"_blank\" rel=\"noopener\">${escapeHtml(video.title)}</a></h1>\n      <p class=\"meta-row\"><strong>${escapeHtml(video.channelName)}</strong></p>\n      <p class=\"meta-row\">${escapeHtml(video.duration)} &bull; ${formatNumber(video.viewCount)} views${video.publishedDate ? ' &bull; ' + escapeHtml(video.publishedDate) : ''}</p>\n      ${videoSummary ? `<p class=\"video-summary\">${escapeHtml(videoSummary)}</p>` : ''}\n    </div>\n  </header>\n  \n  ${tocHtml}\n  ${sectionsHtml}\n  ${linksHtml}\n  ${fullTranscriptHtml}\n  \n  <footer>\n    Generated from <a href=\"${escapeHtml(video.videoUrl)}\" target=\"_blank\" rel=\"noopener\">${escapeHtml(video.videoUrl)}</a>\n  </footer>\n</body>\n</html>`;\n\nreturn { json: { html } };"
+      },
+      "id": "generate-html",
+      "name": "Generate HTML Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1440, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Run Apify Actor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Apify Actor": {
+      "main": [
+        [
+          {
+            "node": "Fetch Dataset Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Dataset Results": {
+      "main": [
+        [
+          {
+            "node": "AI Analyze Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Analyze Transcript": {
+      "main": [
+        [
+          {
+            "node": "Generate HTML Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate HTML Page": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "updatedAt": "2026-02-08T00:00:00.000Z",
+  "versionId": "1"
+}
