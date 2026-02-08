@@ -45,28 +45,115 @@ export function formatTimestamp(totalSeconds: number): string {
     return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+interface CaptionTrack {
+    baseUrl: string;
+    languageCode: string;
+    name?: { simpleText?: string };
+    kind?: string;
+}
+
 /**
- * Fetch transcript/captions for a YouTube video.
- * Uses the youtube-transcript package which pulls auto-generated or manual captions.
+ * Fetch transcript by scraping the watch page for caption track URLs,
+ * then fetching the timedtext XML directly.
+ *
+ * This avoids third-party libraries that break when YouTube updates their player.
  */
 export async function fetchTranscript(
     videoId: string,
     language: string = 'en',
 ): Promise<TranscriptSegment[]> {
-    // Dynamic import because youtube-transcript is ESM
-    const { YoutubeTranscript } = await import('youtube-transcript');
-
     log.info(`Fetching transcript for video ${videoId} (lang: ${language})`);
 
     try {
-        const raw = await YoutubeTranscript.fetchTranscript(videoId, { lang: language });
+        // Step 1: Fetch watch page to find caption tracks
+        const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+        const res = await fetch(watchUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+            },
+        });
+        const html = await res.text();
 
-        return raw.map((item: { text: string; offset: number; duration: number }) => ({
-            text: item.text,
-            startSeconds: Math.round(item.offset / 1000 * 100) / 100,
-            durationSeconds: Math.round(item.duration / 1000 * 100) / 100,
-            startFormatted: formatTimestamp(item.offset / 1000),
-        }));
+        // Extract ytInitialPlayerResponse which contains captionTracks
+        const playerMatch = html.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+        if (!playerMatch) {
+            log.warning('Could not find ytInitialPlayerResponse in page');
+            return [];
+        }
+
+        const player = JSON.parse(playerMatch[1]) as {
+            captions?: {
+                playerCaptionsTracklistRenderer?: {
+                    captionTracks?: CaptionTrack[];
+                };
+            };
+        };
+
+        const tracks = player.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+        if (!tracks || tracks.length === 0) {
+            log.warning('No caption tracks found for this video');
+            return [];
+        }
+
+        // Step 2: Pick the best track — prefer exact language match, then auto-generated
+        let track = tracks.find((t) => t.languageCode === language && t.kind !== 'asr');
+        if (!track) track = tracks.find((t) => t.languageCode === language);
+        if (!track) track = tracks.find((t) => t.kind !== 'asr'); // any manual track
+        if (!track) track = tracks[0]; // fallback to first available
+
+        log.info(`Using caption track: ${track.languageCode} (${track.kind ?? 'manual'})`);
+
+        // Step 3: Fetch the timedtext XML
+        // Append fmt=json3 to get JSON format instead of XML
+        const captionUrl = `${track.baseUrl}&fmt=json3`;
+        const captionRes = await fetch(captionUrl);
+        if (!captionRes.ok) {
+            log.warning(`Caption fetch failed with status ${captionRes.status}`);
+            return [];
+        }
+
+        const captionData = (await captionRes.json()) as {
+            events?: Array<{
+                tStartMs?: number;
+                dDurationMs?: number;
+                segs?: Array<{ utf8?: string }>;
+            }>;
+        };
+
+        if (!captionData.events) {
+            log.warning('No events in caption data');
+            return [];
+        }
+
+        // Step 4: Parse into our format
+        const segments: TranscriptSegment[] = [];
+
+        for (const event of captionData.events) {
+            // Skip events without text segments (e.g. line break markers)
+            if (!event.segs) continue;
+
+            const text = event.segs
+                .map((s) => s.utf8 ?? '')
+                .join('')
+                .trim();
+
+            if (!text || text === '\n') continue;
+
+            const startMs = event.tStartMs ?? 0;
+            const durationMs = event.dDurationMs ?? 0;
+            const startSeconds = Math.round((startMs / 1000) * 100) / 100;
+            const durationSeconds = Math.round((durationMs / 1000) * 100) / 100;
+
+            segments.push({
+                text,
+                startSeconds,
+                durationSeconds,
+                startFormatted: formatTimestamp(startMs / 1000),
+            });
+        }
+
+        return segments;
     } catch (err) {
         log.warning(`Could not fetch transcript: ${(err as Error).message}`);
         return [];
