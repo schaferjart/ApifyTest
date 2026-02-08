@@ -1,34 +1,40 @@
 import { log } from 'crawlee';
 import type { TranscriptSegment } from './types.js';
+import { fetchWithRetry, YOUTUBE_HEADERS, extractPlayerResponse } from './utils.js';
+
+/** Route keywords that are never a video ID */
+const ROUTE_KEYWORDS = new Set(['watch', 'embed', 'shorts', 'live', 'v', 'channel', 'playlist']);
 
 /**
  * Extract the video ID from various YouTube URL formats.
  */
 export function extractVideoId(urlOrId: string): string {
+    const trimmed = urlOrId.trim();
+
     // Already a plain video ID (11 chars, alphanumeric + dash/underscore)
-    if (/^[\w-]{11}$/.test(urlOrId)) {
-        return urlOrId;
+    if (/^[\w-]{11}$/.test(trimmed)) {
+        return trimmed;
     }
 
     try {
-        const url = new URL(urlOrId);
+        const url = new URL(trimmed);
         // youtube.com/watch?v=ID
         if (url.searchParams.has('v')) {
             return url.searchParams.get('v')!;
         }
         // youtu.be/ID or youtube.com/embed/ID or youtube.com/shorts/ID
         const pathParts = url.pathname.split('/').filter(Boolean);
-        if (pathParts.length > 0) {
-            const lastPart = pathParts[pathParts.length - 1];
-            if (/^[\w-]{11}$/.test(lastPart)) {
-                return lastPart;
+        for (const part of pathParts) {
+            if (ROUTE_KEYWORDS.has(part.toLowerCase())) continue;
+            if (/^[\w-]{11}$/.test(part)) {
+                return part;
             }
         }
     } catch {
         // not a URL
     }
 
-    throw new Error(`Could not extract video ID from: ${urlOrId}`);
+    throw new Error(`Could not extract video ID from: ${trimmed}`);
 }
 
 /**
@@ -67,22 +73,21 @@ export async function fetchTranscript(
     try {
         // Step 1: Fetch watch page to find caption tracks
         const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
-        const res = await fetch(watchUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-            },
-        });
+        const res = await fetchWithRetry(watchUrl, { headers: YOUTUBE_HEADERS });
+        if (!res.ok) {
+            log.warning(`Watch page returned status ${res.status}`);
+            return [];
+        }
         const html = await res.text();
 
         // Extract ytInitialPlayerResponse which contains captionTracks
-        const playerMatch = html.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
-        if (!playerMatch) {
+        const playerObj = extractPlayerResponse(html);
+        if (!playerObj) {
             log.warning('Could not find ytInitialPlayerResponse in page');
             return [];
         }
 
-        const player = JSON.parse(playerMatch[1]) as {
+        const player = playerObj as {
             captions?: {
                 playerCaptionsTracklistRenderer?: {
                     captionTracks?: CaptionTrack[];
@@ -107,7 +112,7 @@ export async function fetchTranscript(
         // Step 3: Fetch the timedtext XML
         // Append fmt=json3 to get JSON format instead of XML
         const captionUrl = `${track.baseUrl}&fmt=json3`;
-        const captionRes = await fetch(captionUrl);
+        const captionRes = await fetchWithRetry(captionUrl);
         if (!captionRes.ok) {
             log.warning(`Caption fetch failed with status ${captionRes.status}`);
             return [];

@@ -3,6 +3,9 @@ import { Actor } from 'apify';
 import type { StillFrame, VideoChapter } from './types.js';
 import { formatTimestamp } from './transcript.js';
 
+/** Fallback thumbnail suffixes to cycle through for variety */
+const FALLBACK_THUMBS = ['0.jpg', '1.jpg', '2.jpg', '3.jpg'];
+
 /**
  * Determine which timestamps to capture frames at.
  *
@@ -21,7 +24,7 @@ export function pickTimestamps(
     if (chapters.length >= 2) {
         // Use chapter start points (offset by 5s to avoid black transition frames)
         for (const ch of chapters) {
-            const t = Math.min(ch.startSeconds + 5, durationSeconds - 1);
+            const t = Math.max(0, Math.min(ch.startSeconds + 5, durationSeconds - 1));
             timestamps.push({ seconds: t, label: ch.title });
         }
     } else {
@@ -65,18 +68,9 @@ export async function captureFrames(
 
     log.info(`Capturing ${timestamps.length} still frames for video ${videoId}`);
 
-    for (const ts of timestamps) {
-        // YouTube's storyboard/thumbnail API — reliable without ffmpeg
-        // This uses the video thumbnail at a specific time via the i.ytimg.com endpoint
-        // Format: https://i.ytimg.com/vi/{id}/hqdefault.jpg for the main thumb,
-        // or we store a KV reference with the timestamp for the user.
+    for (let i = 0; i < timestamps.length; i++) {
+        const ts = timestamps[i];
 
-        // We'll generate a thumbnail URL and also try to fetch actual frame via
-        // YouTube's get_video_info storyboard if possible.
-        const imageUrl = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
-
-        // For a more granular approach, we push the timestamp info alongside the thumb
-        // and note that the actual frame capture requires ffmpeg (available in Docker)
         const key = `frame-${videoId}-${Math.floor(ts.seconds)}`;
 
         try {
@@ -95,11 +89,16 @@ export async function captureFrames(
             // ffmpeg not available, fall through to thumbnail
         }
 
+        // Cycle through different thumbnail images for variety
+        const thumbSuffix = FALLBACK_THUMBS[i % FALLBACK_THUMBS.length];
+        const imageUrl = `https://i.ytimg.com/vi/${videoId}/${thumbSuffix}`;
+
         frames.push({
             timestampSeconds: ts.seconds,
             timestampFormatted: formatTimestamp(ts.seconds),
             label: ts.label,
             imageUrl,
+            isFallback: true,
         });
     }
 
@@ -116,7 +115,7 @@ async function captureWithFfmpeg(
     key: string,
 ): Promise<string | null> {
     try {
-        const { execSync } = await import('child_process');
+        const { execFileSync } = await import('child_process');
         const { readFileSync, unlinkSync, existsSync } = await import('fs');
 
         const tmpFile = `/tmp/${key}.jpg`;
@@ -125,16 +124,18 @@ async function captureWithFfmpeg(
 
         // Get direct stream URL via yt-dlp, then extract frame with ffmpeg
         // This only works when yt-dlp and ffmpeg are installed (Docker image)
-        const streamUrl = execSync(
-            `yt-dlp -f "best[height<=720]" --get-url "${videoUrl}" 2>/dev/null`,
-            { encoding: 'utf-8', timeout: 30000 },
+        const streamUrl = execFileSync(
+            'yt-dlp',
+            ['-f', 'best[height<=720]', '--get-url', videoUrl],
+            { encoding: 'utf-8', timeout: 60000 },
         ).trim();
 
         if (!streamUrl) return null;
 
-        execSync(
-            `ffmpeg -ss ${timestamp} -i "${streamUrl}" -frames:v 1 -q:v 2 "${tmpFile}" -y 2>/dev/null`,
-            { timeout: 30000 },
+        execFileSync(
+            'ffmpeg',
+            ['-ss', timestamp, '-i', streamUrl, '-frames:v', '1', '-q:v', '2', tmpFile, '-y'],
+            { timeout: 45000, stdio: 'pipe' },
         );
 
         if (!existsSync(tmpFile)) return null;

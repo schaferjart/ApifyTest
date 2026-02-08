@@ -12,23 +12,50 @@ try {
     // ----- Input -----
     const input = (await Actor.getInput<ActorInput>()) ?? ({} as ActorInput);
 
-    if (!input.videoUrl) {
+    const rawUrl = (input.videoUrl ?? '').trim();
+    if (!rawUrl) {
         throw new Error('Missing required input field "videoUrl". Provide a YouTube URL or video ID.');
     }
 
     const language = input.language ?? 'en';
     const shouldCaptureFrames = input.captureFrames ?? true;
-    const maxFrames = input.maxFrames ?? 10;
-    const frameInterval = input.frameIntervalSeconds ?? 60;
+    const maxFrames = Math.max(1, Math.min(50, input.maxFrames ?? 10));
+    const frameInterval = Math.max(10, Math.min(600, input.frameIntervalSeconds ?? 60));
 
-    const videoId = extractVideoId(input.videoUrl);
+    const videoId = extractVideoId(rawUrl);
     log.info(`Processing video: ${videoId}`);
 
-    // ----- Fetch metadata + transcript in parallel -----
-    const [metadata, transcript] = await Promise.all([
+    // ----- Fetch metadata + transcript in parallel (resilient) -----
+    const results = await Promise.allSettled([
         fetchMetadata(videoId),
         fetchTranscript(videoId, language),
     ]);
+
+    const metadata = results[0].status === 'fulfilled'
+        ? results[0].value
+        : {
+            title: 'Unknown',
+            channelName: 'Unknown',
+            channelUrl: '',
+            publishedDate: '',
+            duration: '0:00',
+            durationSeconds: 0,
+            viewCount: 0,
+            description: '',
+            thumbnailUrl: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+            chapters: [],
+            links: [],
+        };
+
+    if (results[0].status === 'rejected') {
+        log.warning(`Metadata fetch failed, using defaults: ${results[0].reason}`);
+    }
+
+    const transcript = results[1].status === 'fulfilled' ? results[1].value : [];
+
+    if (results[1].status === 'rejected') {
+        log.warning(`Transcript fetch failed, using empty transcript: ${results[1].reason}`);
+    }
 
     // ----- Full transcript as a single text block -----
     const fullTranscriptText = transcript.map((seg) => seg.text).join(' ');

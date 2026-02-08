@@ -1,12 +1,13 @@
 import { log } from 'crawlee';
 import type { VideoChapter, ExtractedLink } from './types.js';
 import { formatTimestamp } from './transcript.js';
+import { fetchWithRetry, YOUTUBE_HEADERS, extractPlayerResponse } from './utils.js';
 
 /** Regex to find URLs in text */
 const URL_REGEX = /https?:\/\/[^\s)<>\"]+/g;
 
 /** Regex to find timestamp-based chapters in descriptions like "0:00 Intro" */
-const CHAPTER_REGEX = /^(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\s+(.+)$/gm;
+const CHAPTER_REGEX = /^\s*(?:(\d{1,3}):)?(\d{1,2}):(\d{2})\s*[-\u2013\u2014]?\s+(.+)$/gm;
 
 export interface VideoMetadata {
     title: string;
@@ -27,7 +28,7 @@ export interface VideoMetadata {
  *
  * Strategy:
  *  1. oEmbed API for title + channel (always works, official endpoint)
- *  2. Watch page HTML → extract ytInitialPlayerResponse JSON for duration,
+ *  2. Watch page HTML -> extract ytInitialPlayerResponse JSON for duration,
  *     description, view count, etc.
  */
 export async function fetchMetadata(videoId: string): Promise<VideoMetadata> {
@@ -40,7 +41,7 @@ export async function fetchMetadata(videoId: string): Promise<VideoMetadata> {
 
     try {
         const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
-        const oembedRes = await fetch(oembedUrl);
+        const oembedRes = await fetchWithRetry(oembedUrl);
         if (oembedRes.ok) {
             const oembed = (await oembedRes.json()) as {
                 title?: string;
@@ -63,48 +64,47 @@ export async function fetchMetadata(videoId: string): Promise<VideoMetadata> {
 
     try {
         const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
-        const watchRes = await fetch(watchUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-            },
-        });
-        const html = await watchRes.text();
+        const watchRes = await fetchWithRetry(watchUrl, { headers: YOUTUBE_HEADERS });
+        if (!watchRes.ok) {
+            log.warning(`Watch page returned status ${watchRes.status}`);
+        } else {
+            const html = await watchRes.text();
 
-        // Extract ytInitialPlayerResponse
-        const playerMatch = html.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
-        if (playerMatch) {
-            const player = JSON.parse(playerMatch[1]) as {
-                videoDetails?: {
-                    shortDescription?: string;
-                    lengthSeconds?: string;
-                    viewCount?: string;
-                    title?: string;
-                    author?: string;
-                    channelId?: string;
-                };
-                microformat?: {
-                    playerMicroformatRenderer?: {
-                        publishDate?: string;
-                        description?: { simpleText?: string };
+            // Extract ytInitialPlayerResponse
+            const playerObj = extractPlayerResponse(html);
+            if (playerObj) {
+                const player = playerObj as {
+                    videoDetails?: {
+                        shortDescription?: string;
+                        lengthSeconds?: string;
+                        viewCount?: string;
+                        title?: string;
+                        author?: string;
+                        channelId?: string;
+                    };
+                    microformat?: {
+                        playerMicroformatRenderer?: {
+                            publishDate?: string;
+                            description?: { simpleText?: string };
+                        };
                     };
                 };
-            };
-            const details = player.videoDetails;
-            if (details) {
-                description = details.shortDescription ?? '';
-                durationSeconds = parseInt(details.lengthSeconds ?? '0', 10);
-                viewCount = parseInt(details.viewCount ?? '0', 10);
-                // Use playerResponse title/author as fallback
-                if (title === 'Unknown') title = details.title ?? title;
-                if (channelName === 'Unknown') channelName = details.author ?? channelName;
-                if (!channelUrl && details.channelId) {
-                    channelUrl = `https://www.youtube.com/channel/${details.channelId}`;
+                const details = player.videoDetails;
+                if (details) {
+                    description = details.shortDescription ?? '';
+                    durationSeconds = parseInt(details.lengthSeconds ?? '0', 10);
+                    viewCount = parseInt(details.viewCount ?? '0', 10);
+                    // Use playerResponse title/author as fallback
+                    if (title === 'Unknown') title = details.title ?? title;
+                    if (channelName === 'Unknown') channelName = details.author ?? channelName;
+                    if (!channelUrl && details.channelId) {
+                        channelUrl = `https://www.youtube.com/channel/${details.channelId}`;
+                    }
                 }
-            }
-            const micro = player.microformat?.playerMicroformatRenderer;
-            if (micro) {
-                publishedDate = micro.publishDate ?? '';
+                const micro = player.microformat?.playerMicroformatRenderer;
+                if (micro) {
+                    publishedDate = micro.publishDate ?? '';
+                }
             }
         }
     } catch (err) {

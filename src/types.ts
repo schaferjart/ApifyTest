@@ -39,6 +39,7 @@ export interface StillFrame {
     timestampFormatted: string;
     label: string;
     imageUrl: string;
+    isFallback?: boolean;
 }
 
 /** Full output of the actor */
