@@ -54,10 +54,11 @@ try {
             metadata.chapters,
             maxFrames,
             frameInterval,
+            transcript,
         );
 
         if (timestamps.length > 0) {
-            frames = await captureFrames(videoId, timestamps);
+            frames = await captureFrames(videoId, timestamps, metadata.storyboardSpec);
         }
     }
 

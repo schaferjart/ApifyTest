@@ -39,6 +39,10 @@ export interface StillFrame {
     timestampFormatted: string;
     label: string;
     imageUrl: string;
+    transcriptContext?: string;
+    chapterTitle?: string;
+    relevance?: string;
+    tileRect?: { x: number; y: number; w: number; h: number };
 }
 
 /** Full output of the actor */
