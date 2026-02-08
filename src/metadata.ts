@@ -23,37 +23,103 @@ export interface VideoMetadata {
 }
 
 /**
- * Fetch video metadata using youtubei.js (Innertube client — no API key needed).
+ * Fetch video metadata by scraping the YouTube watch page.
+ *
+ * Strategy:
+ *  1. oEmbed API for title + channel (always works, official endpoint)
+ *  2. Watch page HTML → extract ytInitialPlayerResponse JSON for duration,
+ *     description, view count, etc.
  */
 export async function fetchMetadata(videoId: string): Promise<VideoMetadata> {
     log.info(`Fetching metadata for video ${videoId}`);
 
-    const { Innertube } = await import('youtubei.js');
-    const yt = await Innertube.create({ generate_session_locally: true });
+    // --- oEmbed (reliable basics) ---
+    let title = 'Unknown';
+    let channelName = 'Unknown';
+    let channelUrl = '';
 
-    const info = await yt.getBasicInfo(videoId);
-    const details = info.basic_info;
+    try {
+        const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
+        const oembedRes = await fetch(oembedUrl);
+        if (oembedRes.ok) {
+            const oembed = (await oembedRes.json()) as {
+                title?: string;
+                author_name?: string;
+                author_url?: string;
+            };
+            title = oembed.title ?? title;
+            channelName = oembed.author_name ?? channelName;
+            channelUrl = oembed.author_url ?? channelUrl;
+        }
+    } catch (err) {
+        log.warning(`oEmbed fetch failed: ${(err as Error).message}`);
+    }
 
-    const title = details.title ?? 'Unknown';
-    const channelName = details.channel?.name ?? details.author ?? 'Unknown';
-    const channelUrl = details.channel?.url ?? '';
-    const durationSeconds = details.duration ?? 0;
-    const description = details.short_description ?? '';
-    const viewCount = details.view_count ?? 0;
+    // --- Watch page scrape (description, duration, views) ---
+    let description = '';
+    let durationSeconds = 0;
+    let viewCount = 0;
+    let publishedDate = '';
+
+    try {
+        const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+        const watchRes = await fetch(watchUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+            },
+        });
+        const html = await watchRes.text();
+
+        // Extract ytInitialPlayerResponse
+        const playerMatch = html.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+        if (playerMatch) {
+            const player = JSON.parse(playerMatch[1]) as {
+                videoDetails?: {
+                    shortDescription?: string;
+                    lengthSeconds?: string;
+                    viewCount?: string;
+                    title?: string;
+                    author?: string;
+                    channelId?: string;
+                };
+                microformat?: {
+                    playerMicroformatRenderer?: {
+                        publishDate?: string;
+                        description?: { simpleText?: string };
+                    };
+                };
+            };
+            const details = player.videoDetails;
+            if (details) {
+                description = details.shortDescription ?? '';
+                durationSeconds = parseInt(details.lengthSeconds ?? '0', 10);
+                viewCount = parseInt(details.viewCount ?? '0', 10);
+                // Use playerResponse title/author as fallback
+                if (title === 'Unknown') title = details.title ?? title;
+                if (channelName === 'Unknown') channelName = details.author ?? channelName;
+                if (!channelUrl && details.channelId) {
+                    channelUrl = `https://www.youtube.com/channel/${details.channelId}`;
+                }
+            }
+            const micro = player.microformat?.playerMicroformatRenderer;
+            if (micro) {
+                publishedDate = micro.publishDate ?? '';
+            }
+        }
+    } catch (err) {
+        log.warning(`Watch page scrape failed: ${(err as Error).message}`);
+    }
 
     const thumbnailUrl = `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`;
-
-    // Parse chapters from description
     const chapters = parseChapters(description);
-
-    // Extract links from description
     const links = extractLinks(description);
 
     return {
         title,
         channelName,
         channelUrl,
-        publishedDate: '', // basic_info doesn't always have this; we set what we can
+        publishedDate,
         duration: formatTimestamp(durationSeconds),
         durationSeconds,
         viewCount,
