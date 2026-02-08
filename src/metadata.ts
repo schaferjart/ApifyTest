@@ -21,6 +21,7 @@ export interface VideoMetadata {
     thumbnailUrl: string;
     chapters: VideoChapter[];
     links: ExtractedLink[];
+    storyboardSpec: string | null;
 }
 
 /**
@@ -61,6 +62,7 @@ export async function fetchMetadata(videoId: string): Promise<VideoMetadata> {
     let durationSeconds = 0;
     let viewCount = 0;
     let publishedDate = '';
+    let storyboardSpec: string | null = null;
 
     try {
         const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
@@ -88,13 +90,17 @@ export async function fetchMetadata(videoId: string): Promise<VideoMetadata> {
                             description?: { simpleText?: string };
                         };
                     };
+                    storyboards?: {
+                        playerStoryboardSpecRenderer?: {
+                            spec?: string;
+                        };
+                    };
                 };
                 const details = player.videoDetails;
                 if (details) {
                     description = details.shortDescription ?? '';
                     durationSeconds = parseInt(details.lengthSeconds ?? '0', 10);
                     viewCount = parseInt(details.viewCount ?? '0', 10);
-                    // Use playerResponse title/author as fallback
                     if (title === 'Unknown') title = details.title ?? title;
                     if (channelName === 'Unknown') channelName = details.author ?? channelName;
                     if (!channelUrl && details.channelId) {
@@ -105,6 +111,7 @@ export async function fetchMetadata(videoId: string): Promise<VideoMetadata> {
                 if (micro) {
                     publishedDate = micro.publishDate ?? '';
                 }
+                storyboardSpec = player.storyboards?.playerStoryboardSpecRenderer?.spec ?? null;
             }
         }
     } catch (err) {
@@ -127,6 +134,7 @@ export async function fetchMetadata(videoId: string): Promise<VideoMetadata> {
         thumbnailUrl,
         chapters,
         links,
+        storyboardSpec,
     };
 }
 

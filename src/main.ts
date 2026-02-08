@@ -45,6 +45,7 @@ try {
             thumbnailUrl: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
             chapters: [],
             links: [],
+            storyboardSpec: null,
         };
 
     if (results[0].status === 'rejected') {
@@ -81,10 +82,11 @@ try {
             metadata.chapters,
             maxFrames,
             frameInterval,
+            transcript,
         );
 
         if (timestamps.length > 0) {
-            frames = await captureFrames(videoId, timestamps);
+            frames = await captureFrames(videoId, timestamps, metadata.storyboardSpec);
         }
     }
 

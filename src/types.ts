@@ -40,6 +40,10 @@ export interface StillFrame {
     label: string;
     imageUrl: string;
     isFallback?: boolean;
+    transcriptContext?: string;
+    chapterTitle?: string;
+    relevance?: string;
+    tileRect?: { x: number; y: number; w: number; h: number };
 }
 
 /** Full output of the actor */
