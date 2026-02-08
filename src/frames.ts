@@ -145,9 +145,10 @@ async function captureWithFfmpeg(
 
         unlinkSync(tmpFile);
 
-        const storeInfo = await kvStore.getInfo();
-        if (!storeInfo) return null;
-        return `https://api.apify.com/v2/key-value-stores/${storeInfo.id}/records/${key}`;
+        // Get the store URL from the environment or construct it
+        const storeId = process.env.APIFY_DEFAULT_KEY_VALUE_STORE_ID;
+        if (!storeId) return null;
+        return `https://api.apify.com/v2/key-value-stores/${storeId}/records/${key}`;
     } catch {
         return null;
     }
