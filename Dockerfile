@@ -1,12 +1,17 @@
 FROM apify/actor-node:18
 
-# Install ffmpeg for frame extraction
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+# Install ffmpeg for frame extraction (Alpine uses apk, not apt-get)
+RUN apk add --no-cache ffmpeg
 
+# Copy package files and install dependencies
 COPY package*.json ./
-RUN npm install --omit=dev --include=dev && npm run build
+RUN npm install --include=dev
 
+# Copy source and build
 COPY . ./
 RUN npm run build
+
+# Remove dev dependencies for smaller image
+RUN npm prune --omit=dev
 
 CMD ["npm", "start"]
